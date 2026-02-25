@@ -1,0 +1,22 @@
+# Run outputs (keep outputs/ directory)
+outputs/run_*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Optional: uncomment if you do not want to track sample_data contents
+# sample_data/stone/data/*.nii.gz
+# sample_data/stone/features/*.npz
+# sample_data/acdc/data/*.nii.gz
+# sample_data/acdc/feature/*.npz

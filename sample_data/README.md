@@ -1,0 +1,1 @@
+Optional demo data. Either copy real STONE/ACDC files into `stone/data`, `stone/features`, `acdc/data`, `acdc/feature`, or generate synthetic data with `python scripts/create_sample_data.py` from the repo root.
