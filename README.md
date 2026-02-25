@@ -2,7 +2,7 @@
 
 This repository provides minimal inference code for the groupwise registration method described in the paper with pretrained weights. It runs on one STONE and one ACDC case and exports displacement fields, metrics, and visualisations (PNG + GIF). Raw image is included for reference only.
 
-**STONE (138_4)** — comparison of registration results (Raw, Elastix, PCA-OS, MultiMorph, MultiMorph-Seg, Any²Reg-Raw, Any²Reg-FM, Any²Reg-IO):
+**STONE (138_4)** — comparison of registration results (Raw, Elastix, GroupRegNet, MultiMorph, MultiMorph-Seg, Any²Reg w/o FM, Any²Reg, Any²Reg IO):
 
 ![STONE 138_4](figures/stone_138_4_combined_no_mask.gif)
 
