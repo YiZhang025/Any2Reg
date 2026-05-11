@@ -1,6 +1,19 @@
-# Any2Reg — Supplementary Code
+# Set-Based Groupwise Registration for Variable-Length, Variable-Contrast Cardiac MRI
 
-This repository provides minimal inference code for the groupwise registration method described in the paper with pretrained weights. It runs on one STONE and one ACDC case and exports displacement fields, metrics, and visualisations (PNG + GIF). Raw image is included for reference only.
+Official inference and visualization code for this MICCAI 2026 work.
+This repository provides minimal inference code with pretrained weights on one STONE and one ACDC case, and exports displacement fields, metrics, and visualizations (PNG + GIF).
+Code and pretrained weights are publicly available in this repository.
+
+Project page: `index.html`
+
+## Authors
+
+- Yi Zhang (Delft University of Technology) <y.zhang-43@tudelft.nl>
+- Yidong Zhao (Delft University of Technology)
+- Tijmen Toxopeus (Delft University of Technology)
+- Maša Božić-Iven (Delft University of Technology)
+- Sebastian Weingärtner (Delft University of Technology)
+- Qian Tao (Delft University of Technology) <q.tao@tudelft.nl>
 
 **STONE (138_4)** — comparison of registration results (Raw, Elastix, GroupRegNet, MultiMorph, MultiMorph-Seg, Any²Reg w/o FM, Any²Reg, Any²Reg IO):
 
@@ -17,3 +30,16 @@ This repository provides minimal inference code for the groupwise registration m
 **Data.** STONE: NIfTI volumes in `data/`, optional precomputed features in `features/*_features.npz` (key `logits_final`). ACDC: same layout under `acdc/data` and `acdc/feature`. The demo expects one STONE subject (e.g. 138_4) and one ACDC slice; see `sample_data/README.md` for generating synthetic data.
 
 **License.** MIT. Research use only.
+
+## Citation
+
+If you use this code, please cite:
+
+```bibtex
+@inproceedings{zhang2026any2regnet,
+  title     = {Set-Based Groupwise Registration for Variable-Length, Variable-Contrast Cardiac MRI},
+  author    = {Zhang, Yi and Zhao, Yidong and Toxopeus, Tijmen and Bozic-Iven, Masa and Weingartner, Sebastian and Tao, Qian},
+  booktitle = {Medical Image Computing and Computer Assisted Intervention (MICCAI)},
+  year      = {2026}
+}
+```

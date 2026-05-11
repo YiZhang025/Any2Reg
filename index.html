@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Any2Reg: Set-Based Groupwise Registration for Variable-Length, Variable-Contrast Cardiac MRI | MICCAI 2026</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --fg: #1a1a1a;
+      --muted: #5b616b;
+      --card: #f6f8fb;
+      --accent: #2a67f3;
+      --border: #e8ebf0;
+      --maxw: 1080px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      color: var(--fg);
+      background: var(--bg);
+      line-height: 1.5;
+    }
+    .container {
+      width: min(var(--maxw), 92vw);
+      margin: 0 auto;
+      padding: 28px 0;
+    }
+    h1, h2, h3 { margin: 0 0 12px; line-height: 1.2; }
+    h1 { font-size: clamp(1.7rem, 3vw, 2.5rem); }
+    h2 { font-size: clamp(1.25rem, 2vw, 1.65rem); margin-top: 12px; }
+    p { margin: 0 0 10px; color: var(--muted); }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .hero {
+      text-align: center;
+      padding-top: 18px;
+      padding-bottom: 8px;
+    }
+    .authors {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px 12px;
+      margin: 14px auto 8px;
+      font-size: 0.97rem;
+      color: var(--accent);
+    }
+    .authors span { white-space: nowrap; }
+    .authors a { color: var(--accent); }
+    .affiliation { color: var(--muted); font-size: 0.96rem; }
+    .links {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .btn {
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: #1f2937;
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 0.93rem;
+      font-weight: 600;
+    }
+    section { margin: 26px 0 8px; }
+    .panel {
+      border: 1px solid var(--border);
+      background: #fff;
+      border-radius: 14px;
+      overflow: hidden;
+    }
+    .panel img, .panel video {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: #000;
+    }
+    .caption {
+      padding: 10px 14px;
+      background: var(--card);
+      border-top: 1px solid var(--border);
+      font-size: 0.92rem;
+      color: var(--muted);
+    }
+    .footer {
+      margin: 34px 0 12px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .small { font-size: 0.88rem; }
+    .tldr-box {
+      margin: 16px auto 0;
+      max-width: 920px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      border-radius: 12px;
+      padding: 12px 14px;
+      text-align: left;
+      font-size: 0.95rem;
+      color: #273142;
+    }
+    .tldr-box strong {
+      display: inline-block;
+      margin-right: 6px;
+      color: #111827;
+    }
+    .anim-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+    .result-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      align-items: start;
+    }
+    @media (max-width: 900px) {
+      .anim-grid,
+      .result-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header class="hero">
+      <h1>Any2Reg: Set-Based Groupwise Registration for Variable-Length, Variable-Contrast Cardiac MRI</h1>
+      <p>MICCAI 2026 Early Acceptance (Top 9%)</p>
+
+      <div class="authors">
+        <span><a href="mailto:y.zhang-43@tudelft.nl">Yi Zhang</a></span>
+        <span>Yidong Zhao</span>
+        <span>Tijmen Toxopeus</span>
+        <span>Maša Božić-Iven</span>
+        <span>Sebastian Weingärtner</span>
+        <span><a href="mailto:q.tao@tudelft.nl">Qian Tao</a></span>
+      </div>
+      <p class="affiliation">Department of Imaging Physics, Delft University of Technology, the Netherlands</p>
+
+      <div class="links">
+        <a class="btn" href="README.md">Code</a>
+        <a class="btn" href="figures/paper_any2reg_miccai2026.pdf">Paper (PDF)</a>
+        <a class="btn" href="#bibtex">BibTeX</a>
+      </div>
+      <div class="tldr-box">
+        <strong>TL;DR</strong>
+        <em>Any<sup>2</sup>Reg</em> is a set-based groupwise registration framework with cross-protocol generalization: by treating CMR sequences as unordered sets and building a permutation-invariant reference with a shared encoder and correlation-guided aggregation, it is ready to use for a wide range of CMR sequences (STONE, MOLLI, ASL, Cine; L in [11, 60]) with near-linear scalability in deployment.
+      </div>
+    </header>
+
+    <section>
+      <h2>Abstract</h2>
+      <div class="panel">
+        <div class="caption">
+          Cardiac MRI protocols present substantial heterogeneity in sequence length and contrast mechanisms, which challenges conventional groupwise registration models based on fixed channel stacking. We introduce a set-based groupwise registration formulation that decouples sequence order from feature extraction and constructs a canonical reference representation shared across frames. This design yields permutation-equivariant registration behavior and supports arbitrary-length input sequences without architecture changes. Across representative cardiac MRI datasets, our approach demonstrates improved registration quality and more reliable downstream mapping metrics in both qualitative and quantitative evaluations.
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Method Overview</h2>
+      <div class="panel">
+        <img src="figures/method_v7.png" alt="Method overview from paper">
+        <div class="caption">
+          Set-based Any2Reg pipeline: shared feature encoding, correlation-guided aggregation, permutation-invariant reference construction, and equivariant deformation mapping. <a href="figures/method_v7.pdf">View source figure (PDF)</a>.
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Qualitative Result</h2>
+      <div class="result-grid">
+        <div class="panel">
+          <img src="figures/0138_4_0000.png" alt="Qualitative result from paper on case 0138_4_0000">
+          <div class="caption">
+            Head-to-head qualitative comparison on case 0138_4_0000. Any2Reg and Any2Reg-IO yield cleaner T1 maps, lower uncertainty, and higher fitting quality in regions with large motion. <a href="figures/0138_4_0000.pdf">View source figure (PDF)</a>.
+          </div>
+        </div>
+        <div class="panel">
+          <img src="figures/r_2_v3.png" alt="Slice-wise R2 analysis from paper">
+          <div class="caption">
+            Slice-wise quantitative evidence on STONE (LV+Myo): Any2Reg-IO consistently improves mean R<sup>2</sup> from base to apex, with stronger survival behavior across thresholds. <a href="figures/r_2_v3.pdf">View source figure (PDF)</a>.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Animation</h2>
+      <div class="anim-grid">
+        <div class="panel">
+          <img src="figures/stone_138_4_combined_no_mask.gif" alt="Method comparison animation on STONE">
+          <div class="caption">
+            <strong>STONE.</strong> Multi-method temporal registration comparison (Raw, Elastix, GroupRegNet, MultiMorph, MultiMorph-Seg, Any2Reg w/o FM, Any2Reg, Any2Reg-IO).
+          </div>
+        </div>
+        <div class="panel">
+          <img src="figures/acdc_patient101_slice004_combined_no_mask.gif" alt="Method comparison animation on ACDC">
+          <div class="caption">
+            <strong>ACDC.</strong> Cross-protocol generalization example with the same comparison protocol and ranking trend as STONE.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Availability</h2>
+      <div class="panel">
+        <div class="caption">
+          Code and pretrained checkpoints are available in this repository.
+        </div>
+      </div>
+    </section>
+
+    <section id="bibtex">
+      <h2>BibTeX</h2>
+      <div class="panel">
+        <div class="caption small">
+<pre>@inproceedings{zhang2026any2regnet,
+  title     = {Set-Based Groupwise Registration for Variable-Length, Variable-Contrast Cardiac MRI},
+  author    = {Zhang, Yi and Zhao, Yidong and Toxopeus, Tijmen and Bozic-Iven, Masa and Weingartner, Sebastian and Tao, Qian},
+  booktitle = {Medical Image Computing and Computer Assisted Intervention (MICCAI)},
+  year      = {2026}
+}</pre>
+        </div>
+      </div>
+    </section>
+
+    <footer class="footer">
+      Page layout inspired by the style of Nerfies project websites.
+    </footer>
+  </div>
+</body>
+</html>
