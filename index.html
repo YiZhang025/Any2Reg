@@ -152,7 +152,7 @@
       </div>
       <div class="tldr-box">
         <strong>TL;DR</strong>
-        <em>Any<sup>2</sup>Reg</em> is a set-based groupwise registration framework with cross-protocol generalization: by treating CMR sequences as unordered sets and building a permutation-invariant reference with a shared encoder and correlation-guided aggregation, it is ready to use for a wide range of CMR sequences (STONE, MOLLI, ASL, Cine; L in [11, 60]) with near-linear scalability in deployment.
+        <em>Any2Reg</em> (Any<sup>2</sup>Reg) is a set-based groupwise registration framework developed to make CMR registration more flexible and practical: it treats sequences as unordered sets, decouples the model from protocol-specific length and ordering, and shows strong cross-protocol zero-shot generalization on STONE, MOLLI, ASL, and Cine (L in [11, 60]).
       </div>
     </header>
 
@@ -194,18 +194,18 @@
     </section>
 
     <section>
-      <h2>Animation</h2>
+      <h2>Qualitative Result (anime!)</h2>
       <div class="anim-grid">
         <div class="panel">
           <img src="figures/stone_138_4_combined_no_mask.gif" alt="Method comparison animation on STONE">
           <div class="caption">
-            <strong>STONE.</strong> Multi-method temporal registration comparison (Raw, Elastix, GroupRegNet, MultiMorph, MultiMorph-Seg, Any2Reg w/o FM, Any2Reg, Any2Reg-IO).
+            <strong>STONE (training, L=11).</strong> Multi-method comparison across temporal frames.
           </div>
         </div>
         <div class="panel">
           <img src="figures/acdc_patient101_slice004_combined_no_mask.gif" alt="Method comparison animation on ACDC">
           <div class="caption">
-            <strong>ACDC.</strong> Cross-protocol generalization example with the same comparison protocol and ranking trend as STONE.
+            <strong>ACDC (unseen, L=30).</strong> Multi-method comparison across temporal frames.
           </div>
         </div>
       </div>
