@@ -6,6 +6,9 @@ Code and pretrained weights are publicly available in this repository.
 
 Project page: `index.html`
 
+- Project Page: https://yizhang025.github.io/Any2Reg/
+- Paper (PDF): https://yizhang025.github.io/Any2Reg/figures/paper_any2reg_miccai2026.pdf
+
 ## Authors
 
 - Yi Zhang (Delft University of Technology) <y.zhang-43@tudelft.nl>
