@@ -40,6 +40,7 @@ def run_prediction(
     overwrite: bool,
     save_npz: bool,
     save_features: bool,
+    disable_tta: bool,
     num_threads_preprocessing: int,
     num_threads_nifti_save: int,
     extra_env: Dict[str, Optional[str]],
@@ -71,6 +72,8 @@ def run_prediction(
         cmd.append("-z")
     if save_features:
         cmd.append("--save_features")
+    if disable_tta:
+        cmd.append("--disable_tta")
 
     env = os.environ.copy()
     env.update({key: value for key, value in extra_env.items() if value})
@@ -354,13 +357,18 @@ def main() -> None:
     )
     parser.add_argument("--seg-dir-name", default="seg", help="Output folder name for RI segmentation.")
     parser.add_argument("--seg-orig-dir-name", default="seg_orig", help="Output folder name for official segmentation.")
-    parser.add_argument("--task-name", default="Task027_ACDC")
-    parser.add_argument("--trainer", default="nnUNetTrainerV2")
+    parser.add_argument("--task-name", default="Task900_ACDC_Phys")
+    parser.add_argument("--trainer", default="nnUNetTrainerV2_InvGreAug")
     parser.add_argument("--model", default="2d")
     parser.add_argument("--folds", nargs="+", type=int, default=[0, 1, 2, 3, 4])
     parser.add_argument("--skip-predict", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--save-npz", action="store_true")
+    parser.add_argument(
+        "--disable-tta",
+        action="store_true",
+        help="Pass --disable_tta to nnUNet prediction (used for the released ACDC features).",
+    )
     feature_group = parser.add_mutually_exclusive_group()
     feature_group.add_argument(
         "--save-features",
@@ -449,6 +457,7 @@ def main() -> None:
             overwrite=args.overwrite,
             save_npz=args.save_npz,
             save_features=args.save_features,
+            disable_tta=args.disable_tta,
             num_threads_preprocessing=args.num_threads_preprocessing,
             num_threads_nifti_save=args.num_threads_nifti_save,
             extra_env=env,

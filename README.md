@@ -34,6 +34,66 @@ Project page: `index.html`
 
 **Feature generation.** To reproduce the `logits_final` inputs with the
 patched nnUNet v1 inference pipeline, see [`FEATURE_GENERATION.md`](FEATURE_GENERATION.md).
+The real-data end-to-end regression check is documented in
+[`VALIDATION.md`](VALIDATION.md).
+
+## ACDC to registration quickstart
+
+First apply the nnUNet v1 patch and configure the three nnUNet paths as
+described in [`FEATURE_GENERATION.md`](FEATURE_GENERATION.md). Keep every ACDC
+frame as a complete volume named `<patient>_frame<index>_0000.nii.gz`; the
+converter splits slices only after feature prediction.
+
+```bash
+python scripts/generate_acdc_features.py \
+  --input-folder /path/to/ACDC/imagesTs \
+  --pred-folder work/acdc_frame_predictions \
+  --output-folder work/acdc_any2reg \
+  --disable-tta
+```
+
+The released settings (`Task900_ACDC_Phys`,
+`nnUNetTrainerV2_InvGreAug`, 2D, folds 0-4) are the script defaults. Their
+segmentation weights and the ACDC dataset are not distributed here. The
+command creates one temporal case per slice under `work/acdc_any2reg/data/`
+and its matching feature archive under `work/acdc_any2reg/feature/`.
+
+Run registration on one generated slice (change `case_id`, or loop over the
+data directory for a complete subject):
+
+```python
+from pathlib import Path
+import torch
+
+from any2reg_submission import infer, io
+
+root = Path("work/acdc_any2reg")
+case_id = "patient101_slice003"
+case = io.load_nifti_case(root / "data" / f"{case_id}_0000.nii.gz")
+features = io.load_feature_map(
+    root / "feature" / f"{case_id}_features.npz",
+    feature_key="logits_final",
+)
+assert features is not None
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+result = infer.run_any2regnet_inference(
+    case["images"],
+    feature_maps=features,
+    checkpoint_path=Path("checkpoints/any2regnet_raw_logits_best.pth"),
+    device=device,
+)
+if "_stub_warning" in result:
+    raise RuntimeError(result["_stub_warning"])
+
+output = Path("outputs") / case_id
+output.mkdir(parents=True, exist_ok=True)
+io.save_nifti(result["warped"], case["affine"], output / "warped.nii.gz")
+torch.save(result["disp"].detach().cpu(), output / "displacement.pt")
+```
+
+`warped.nii.gz` contains the registered 30-frame sequence and
+`displacement.pt` contains the `(T, 2, H, W)` displacement field.
 
 **License.** MIT. Research use only.
 

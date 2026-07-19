@@ -51,11 +51,12 @@ predictor directly:
 python -m nnunet.inference.predict_simple \
   -i /path/to/input \
   -o /path/to/predictions \
-  -t Task027_ACDC \
-  -tr nnUNetTrainerV2 \
+  -t Task900_ACDC_Phys \
+  -tr nnUNetTrainerV2_InvGreAug \
   -m 2d \
   -f 0 1 2 3 4 \
-  --save_features
+  --save_features \
+  --disable_tta
 ```
 
 Copy or link each generated `<case>_features.npz` into the feature directory
@@ -76,14 +77,24 @@ python scripts/generate_acdc_features.py \
   --input-folder /path/to/acdc/imagesTs \
   --pred-folder /path/to/frame_predictions \
   --output-folder /path/to/any2reg_acdc \
-  --task-name Task027_ACDC \
-  --trainer nnUNetTrainerV2 \
-  --model 2d
+  --task-name Task900_ACDC_Phys \
+  --trainer nnUNetTrainerV2_InvGreAug \
+  --model 2d \
+  --disable-tta
 ```
 
-The script exports features by default. You can pass the three nnUNet paths as
-CLI options instead of environment variables. If frame predictions and
-`*_features.npz` files already exist, add `--skip-predict`.
+`Task900_ACDC_Phys`, `nnUNetTrainerV2_InvGreAug`, five folds, and disabled TTA
+are the settings used to generate the released ACDC feature input. The task and
+trainer are also the script defaults; `--disable-tta` remains explicit so that
+switching TTA on is an intentional choice. The model weights are not included.
+
+The script exports features by default. Pass the three nnUNet paths as CLI
+options instead of environment variables if preferred. If frame predictions
+and `*_features.npz` files already exist, add `--skip-predict`.
+
+Feed complete per-frame volumes to nnUNet, then let this script split them into
+slice-time cases. Cropping a volume to one slice before prediction changes the
+nnUNet intensity-normalization statistics and therefore changes its features.
 
 The converted directory contains:
 
@@ -99,3 +110,6 @@ any2reg_acdc/
 Feature archives can be large. `scripts/shrink_features.py` keeps only
 `logits_final`, crops/pads it to the requested spatial size, and writes a
 compressed copy.
+
+See [`VALIDATION.md`](VALIDATION.md) for a real-data end-to-end check of this
+pipeline and the released Any2Reg checkpoint.
