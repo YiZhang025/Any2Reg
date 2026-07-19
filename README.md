@@ -54,9 +54,11 @@ python scripts/generate_acdc_features.py \
 
 The released settings (`Task900_ACDC_Phys`,
 `nnUNetTrainerV2_InvGreAug`, 2D, folds 0-4) are the script defaults. Their
-segmentation weights and the ACDC dataset are not distributed here. The
-command creates one temporal case per slice under `work/acdc_any2reg/data/`
-and its matching feature archive under `work/acdc_any2reg/feature/`.
+pretrained segmentation weights can be downloaded with
+[`Ido-zh/cmr_reverse/download_nnunet_weights.sh`](https://github.com/Ido-zh/cmr_reverse/blob/main/download_nnunet_weights.sh);
+the ACDC dataset itself is not distributed here. The command creates one
+temporal case per slice under `work/acdc_any2reg/data/` and its matching
+feature archive under `work/acdc_any2reg/feature/`.
 
 Run registration on one generated slice (change `case_id`, or loop over the
 data directory for a complete subject):
