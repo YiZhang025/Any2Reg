@@ -32,6 +32,9 @@ Project page: `index.html`
 
 **Data.** STONE: NIfTI volumes in `data/`, optional precomputed features in `features/*_features.npz` (key `logits_final`). ACDC: same layout under `acdc/data` and `acdc/feature`. The demo expects one STONE subject (e.g. 138_4) and one ACDC slice; see `sample_data/README.md` for generating synthetic data.
 
+**Feature generation.** To reproduce the `logits_final` inputs with the
+patched nnUNet v1 inference pipeline, see [`FEATURE_GENERATION.md`](FEATURE_GENERATION.md).
+
 **License.** MIT. Research use only.
 
 ## Citation

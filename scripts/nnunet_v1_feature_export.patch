@@ -1,0 +1,1149 @@
+diff --git a/nnunet/inference/predict.py b/nnunet/inference/predict.py
+index d498021..126dd00 100644
+--- a/nnunet/inference/predict.py
++++ b/nnunet/inference/predict.py
+@@ -15,11 +15,13 @@
+ 
+ import argparse
+ import os
++import multiprocessing as mp
+ from copy import deepcopy
+ from typing import Tuple, Union, List
+ 
+ import numpy as np
+ from batchgenerators.augmentations.utils import resize_segmentation
++from batchgenerators.augmentations.utils import pad_nd_image
+ from nnunet.inference.segmentation_export import save_segmentation_nifti_from_softmax, save_segmentation_nifti
+ from batchgenerators.utilities.file_and_folder_operations import *
+ import sys
+@@ -106,6 +108,39 @@ def preprocess_multithreaded(trainer, list_of_lists, output_files, num_processes
+ 
+     classes = list(range(1, trainer.num_classes))
+     assert isinstance(trainer, nnUNetTrainer)
++    # Python 3.14 defaults to forkserver on some systems. In that mode, spawning workers
++    # requires pickling trainer state, which fails for lambda fields inside nnUNet models.
++    # Fall back to single-process preprocessing in that case.
++    start_method = mp.get_start_method(allow_none=True)
++    force_single = os.environ.get("NNUNET_FORCE_SINGLE_PROCESS_PREPROCESS", "0") == "1"
++    if force_single or start_method in ("spawn", "forkserver"):
++        if force_single:
++            print("NNUNET_FORCE_SINGLE_PROCESS_PREPROCESS=1 -> using single-process preprocessing")
++        else:
++            print(f"multiprocessing start method is '{start_method}', using single-process preprocessing")
++        for i, l in enumerate(list_of_lists):
++            output_file = output_files[i]
++            print("preprocessing", output_file)
++            d, _, dct = trainer.preprocess_patient(l)
++            if segs_from_prev_stage[i] is not None:
++                assert isfile(segs_from_prev_stage[i]) and segs_from_prev_stage[i].endswith(
++                    ".nii.gz"), "segs_from_prev_stage must point to a segmentation file"
++                seg_prev = sitk.GetArrayFromImage(sitk.ReadImage(segs_from_prev_stage[i]))
++                img = sitk.GetArrayFromImage(sitk.ReadImage(l[0]))
++                assert all([ii == jj for ii, jj in zip(seg_prev.shape, img.shape)]), \
++                    "image and segmentation from previous stage don't have the same pixel array shape! image: %s, seg_prev: %s" % \
++                    (l[0], segs_from_prev_stage[i])
++                seg_prev = seg_prev.transpose(trainer.plans['transpose_forward'])
++                seg_reshaped = resize_segmentation(seg_prev, d.shape[1:], order=1)
++                seg_reshaped = to_one_hot(seg_reshaped, list(range(1, trainer.num_classes)))
++                d = np.vstack((d, seg_reshaped)).astype(np.float32)
++            if np.prod(d.shape) > (2e9 / 4 * 0.85):
++                print("preprocessed array too large for IPC, saving temporary npy")
++                np.save(output_file[:-7] + ".npy", d)
++                d = output_file[:-7] + ".npy"
++            yield output_file, (d, dct)
++        return
++
+     q = Queue(1)
+     processes = []
+     for i in range(num_processes):
+@@ -140,7 +175,9 @@ def predict_cases(model, list_of_lists, output_filenames, folds, save_npz, num_t
+                   num_threads_nifti_save, segs_from_prev_stage=None, do_tta=True, mixed_precision=True,
+                   overwrite_existing=False,
+                   all_in_gpu=False, step_size=0.5, checkpoint_name="model_final_checkpoint",
+-                  segmentation_export_kwargs: dict = None, disable_postprocessing: bool = False):
++                  segmentation_export_kwargs: dict = None, disable_postprocessing: bool = False,
++                  save_features: bool = True):
++    print(f"[predict_cases] mode=normal, save_features={save_features}")
+     """
+     :param segmentation_export_kwargs:
+     :param model: folder where the model is saved, must contain fold_x subfolders
+@@ -175,8 +212,13 @@ def predict_cases(model, list_of_lists, output_filenames, folds, save_npz, num_t
+ 
+     if not overwrite_existing:
+         print("number of cases:", len(list_of_lists))
+-        # if save_npz=True then we should also check for missing npz files
+-        not_done_idx = [i for i, j in enumerate(cleaned_output_files) if (not isfile(j)) or (save_npz and not isfile(j[:-7] + '.npz'))]
++        # also check for missing npz (if save_npz) and missing features (if save_features)
++        not_done_idx = [
++            i for i, j in enumerate(cleaned_output_files)
++            if (not isfile(j))
++               or (save_npz and not isfile(j[:-7] + '.npz'))
++               or (save_features and not isfile(j[:-7] + '_features.npz'))
++        ]
+ 
+         cleaned_output_files = [cleaned_output_files[i] for i in not_done_idx]
+         list_of_lists = [list_of_lists[i] for i in not_done_idx]
+@@ -246,6 +288,22 @@ def predict_cases(model, list_of_lists, output_filenames, folds, save_npz, num_t
+         else:
+             npz_file = None
+ 
++        # optional: save logits & prelogits features next to the segmentation (only via trainer API)
++        if save_features:
++            try:
++                features_npz = output_filename[:-7] + "_features.npz"
++                if not hasattr(trainer, "extract_and_save_features"):
++                    print("WARNING: trainer has no extract_and_save_features; skip feature export for", output_filename)
++                else:
++                    print("saving features via trainer")
++                    trainer.extract_and_save_features(
++                        d, features_npz, use_sliding_window=True, step_size=step_size,
++                        save_dtype=np.float16, compress=False, verbose=False, properties=dct
++                    )
++                    print(f"saved features: {features_npz}")
++            except Exception as e:
++                raise
++
+         if hasattr(trainer, 'regions_class_order'):
+             region_class_order = trainer.regions_class_order
+         else:
+@@ -308,7 +366,9 @@ def predict_cases_fast(model, list_of_lists, output_filenames, folds, num_thread
+                        num_threads_nifti_save, segs_from_prev_stage=None, do_tta=True, mixed_precision=True,
+                        overwrite_existing=False,
+                        all_in_gpu=False, step_size=0.5, checkpoint_name="model_final_checkpoint",
+-                       segmentation_export_kwargs: dict = None, disable_postprocessing: bool = False):
++                       segmentation_export_kwargs: dict = None, disable_postprocessing: bool = False,
++                       save_features: bool = False):
++    print(f"[predict_cases_fast] mode=fast, save_features={save_features}")
+     assert len(list_of_lists) == len(output_filenames)
+     if segs_from_prev_stage is not None: assert len(segs_from_prev_stage) == len(output_filenames)
+ 
+@@ -327,7 +387,10 @@ def predict_cases_fast(model, list_of_lists, output_filenames, folds, num_thread
+ 
+     if not overwrite_existing:
+         print("number of cases:", len(list_of_lists))
+-        not_done_idx = [i for i, j in enumerate(cleaned_output_files) if not isfile(j)]
++        not_done_idx = [
++            i for i, j in enumerate(cleaned_output_files)
++            if (not isfile(j)) or (save_features and not isfile(j[:-7] + '_features.npz'))
++        ]
+ 
+         cleaned_output_files = [cleaned_output_files[i] for i in not_done_idx]
+         list_of_lists = [list_of_lists[i] for i in not_done_idx]
+@@ -417,6 +480,22 @@ def predict_cases_fast(model, list_of_lists, output_filenames, folds, num_thread
+         assert region_class_order is None, "predict_cases_fast can only work with regular softmax predictions " \
+                                            "and is therefore unable to handle trainer classes with region_class_order"
+ 
++        # optional: save logits & prelogits features next to the segmentation (only via trainer API)
++        if save_features:
++            try:
++                features_npz = output_filename[:-7] + "_features.npz"
++                if not hasattr(trainer, "extract_and_save_features"):
++                    print("WARNING: trainer has no extract_and_save_features; skip feature export for", output_filename)
++                else:
++                    print("saving features via trainer")
++                    trainer.extract_and_save_features(
++                        d, features_npz, use_sliding_window=True, step_size=step_size,
++                        save_dtype=np.float16, compress=True, verbose=False
++                    )
++                    print(f"saved features: {features_npz}")
++            except Exception as e:
++                raise
++
+         print("initializing segmentation export")
+         results.append(pool.starmap_async(save_segmentation_nifti,
+                                           ((seg, output_filename, dct, interpolation_order, force_separate_z,
+@@ -455,7 +534,9 @@ def predict_cases_fast(model, list_of_lists, output_filenames, folds, num_thread
+ def predict_cases_fastest(model, list_of_lists, output_filenames, folds, num_threads_preprocessing,
+                           num_threads_nifti_save, segs_from_prev_stage=None, do_tta=True, mixed_precision=True,
+                           overwrite_existing=False, all_in_gpu=False, step_size=0.5,
+-                          checkpoint_name="model_final_checkpoint", disable_postprocessing: bool = False):
++                          checkpoint_name="model_final_checkpoint", disable_postprocessing: bool = False,
++                          save_features: bool = False):
++    print(f"[predict_cases_fastest] mode=fastest, save_features={save_features}")
+     assert len(list_of_lists) == len(output_filenames)
+     if segs_from_prev_stage is not None: assert len(segs_from_prev_stage) == len(output_filenames)
+ 
+@@ -474,7 +555,10 @@ def predict_cases_fastest(model, list_of_lists, output_filenames, folds, num_thr
+ 
+     if not overwrite_existing:
+         print("number of cases:", len(list_of_lists))
+-        not_done_idx = [i for i, j in enumerate(cleaned_output_files) if not isfile(j)]
++        not_done_idx = [
++            i for i, j in enumerate(cleaned_output_files)
++            if (not isfile(j)) or (save_features and not isfile(j[:-7] + '_features.npz'))
++        ]
+ 
+         cleaned_output_files = [cleaned_output_files[i] for i in not_done_idx]
+         list_of_lists = [list_of_lists[i] for i in not_done_idx]
+@@ -544,6 +628,22 @@ def predict_cases_fastest(model, list_of_lists, output_filenames, folds, num_thr
+             transpose_backward = trainer.plans.get('transpose_backward')
+             seg = seg.transpose([i for i in transpose_backward])
+ 
++        # optional: save logits & prelogits features next to the segmentation (only via trainer API)
++        if save_features:
++            try:
++                features_npz = output_filename[:-7] + "_features.npz"
++                if not hasattr(trainer, "extract_and_save_features"):
++                    print("WARNING: trainer has no extract_and_save_features; skip feature export for", output_filename)
++                else:
++                    print("saving features via trainer")
++                    trainer.extract_and_save_features(
++                        d, features_npz, use_sliding_window=True, step_size=step_size,
++                        save_dtype=np.float16, compress=True, verbose=False
++                    )
++                    print(f"saved features: {features_npz}")
++            except Exception as e:
++                raise
++
+         print("initializing segmentation export")
+         results.append(pool.starmap_async(save_segmentation_nifti,
+                                           ((seg, output_filename, dct, 0, None),)
+@@ -619,7 +719,9 @@ def predict_from_folder(model: str, input_folder: str, output_folder: str, folds
+                         part_id: int, num_parts: int, tta: bool, mixed_precision: bool = True,
+                         overwrite_existing: bool = True, mode: str = 'normal', overwrite_all_in_gpu: bool = None,
+                         step_size: float = 0.5, checkpoint_name: str = "model_final_checkpoint",
+-                        segmentation_export_kwargs: dict = None, disable_postprocessing: bool = False):
++                        segmentation_export_kwargs: dict = None, disable_postprocessing: bool = False,
++                        save_features: bool = False):
++    print(f"[predict_from_folder] mode={mode}, save_features={save_features}")
+     """
+         here we use the standard naming scheme to generate list_of_lists and output_files needed by predict_cases
+ 
+@@ -676,7 +778,8 @@ def predict_from_folder(model: str, input_folder: str, output_folder: str, folds
+                              all_in_gpu=all_in_gpu,
+                              step_size=step_size, checkpoint_name=checkpoint_name,
+                              segmentation_export_kwargs=segmentation_export_kwargs,
+-                             disable_postprocessing=disable_postprocessing)
++                             disable_postprocessing=disable_postprocessing,
++                             save_features=save_features)
+     elif mode == "fast":
+         if overwrite_all_in_gpu is None:
+             all_in_gpu = False
+@@ -690,7 +793,8 @@ def predict_from_folder(model: str, input_folder: str, output_folder: str, folds
+                                   all_in_gpu=all_in_gpu,
+                                   step_size=step_size, checkpoint_name=checkpoint_name,
+                                   segmentation_export_kwargs=segmentation_export_kwargs,
+-                                  disable_postprocessing=disable_postprocessing)
++                                  disable_postprocessing=disable_postprocessing,
++                                  save_features=save_features)
+     elif mode == "fastest":
+         if overwrite_all_in_gpu is None:
+             all_in_gpu = False
+@@ -703,7 +807,8 @@ def predict_from_folder(model: str, input_folder: str, output_folder: str, folds
+                                      tta, mixed_precision=mixed_precision, overwrite_existing=overwrite_existing,
+                                      all_in_gpu=all_in_gpu,
+                                      step_size=step_size, checkpoint_name=checkpoint_name,
+-                                     disable_postprocessing=disable_postprocessing)
++                                     disable_postprocessing=disable_postprocessing,
++                                     save_features=save_features)
+     else:
+         raise ValueError("unrecognized mode. Must be normal, fast or fastest")
+ 
+@@ -769,6 +874,8 @@ if __name__ == "__main__":
+     parser.add_argument("--mode", type=str, default="normal", required=False)
+     parser.add_argument("--all_in_gpu", type=str, default="None", required=False, help="can be None, False or True")
+     parser.add_argument("--step_size", type=float, default=0.5, required=False, help="don't touch")
++    parser.add_argument("--save_features", required=False, action='store_true',
++                        help="If set, save logits & prelogits features to *_features.npz next to outputs")
+     # parser.add_argument("--interp_order", required=False, default=3, type=int,
+     #                     help="order of interpolation for segmentations, has no effect if mode=fastest")
+     # parser.add_argument("--interp_order_z", required=False, default=0, type=int,
+@@ -849,4 +956,5 @@ if __name__ == "__main__":
+     predict_from_folder(model, input_folder, output_folder, folds, save_npz, num_threads_preprocessing,
+                         num_threads_nifti_save, lowres_segmentations, part_id, num_parts, tta,
+                         mixed_precision=not args.disable_mixed_precision,
+-                        overwrite_existing=overwrite, mode=mode, overwrite_all_in_gpu=all_in_gpu, step_size=step_size)
++                        overwrite_existing=overwrite, mode=mode, overwrite_all_in_gpu=all_in_gpu, step_size=step_size,
++                        save_features=args.save_features)
+diff --git a/nnunet/inference/predict_simple.py b/nnunet/inference/predict_simple.py
+index 6c9930b..b4bb3cf 100644
+--- a/nnunet/inference/predict_simple.py
++++ b/nnunet/inference/predict_simple.py
+@@ -122,6 +122,8 @@ def main():
+                         help='Predictions are done with mixed precision by default. This improves speed and reduces '
+                              'the required vram. If you want to disable mixed precision you can set this flag. Note '
+                              'that this is not recommended (mixed precision is ~2x faster!)')
++    parser.add_argument("--save_features", required=False, action='store_true',
++                        help="If set, save logits & prelogits features to *_features.npz next to outputs")
+ 
+     args = parser.parse_args()
+     input_folder = args.input_folder
+@@ -200,7 +202,7 @@ def main():
+                             num_threads_preprocessing, num_threads_nifti_save, None, part_id, num_parts, not disable_tta,
+                             overwrite_existing=overwrite_existing, mode=mode, overwrite_all_in_gpu=all_in_gpu,
+                             mixed_precision=not args.disable_mixed_precision,
+-                            step_size=step_size)
++                            step_size=step_size, save_features=False)
+         lowres_segmentations = lowres_output_folder
+         torch.cuda.empty_cache()
+         print("3d_lowres done")
+@@ -220,7 +222,7 @@ def main():
+                         num_threads_nifti_save, lowres_segmentations, part_id, num_parts, not disable_tta,
+                         overwrite_existing=overwrite_existing, mode=mode, overwrite_all_in_gpu=all_in_gpu,
+                         mixed_precision=not args.disable_mixed_precision,
+-                        step_size=step_size, checkpoint_name=args.chk)
++                        step_size=step_size, checkpoint_name=args.chk, save_features=args.save_features)
+     end = time()
+     save_json(end - st, join(output_folder, 'prediction_time.txt'))
+ 
+diff --git a/nnunet/network_architecture/neural_network.py b/nnunet/network_architecture/neural_network.py
+index 7cd69db..8d28d4f 100644
+--- a/nnunet/network_architecture/neural_network.py
++++ b/nnunet/network_architecture/neural_network.py
+@@ -21,6 +21,7 @@ from torch import nn
+ import torch
+ from scipy.ndimage.filters import gaussian_filter
+ from typing import Union, Tuple, List
++import torch.nn.functional as F
+ 
+ from torch.cuda.amp import autocast
+ 
+@@ -593,32 +594,236 @@ class SegmentationNetwork(NeuralNetwork):
+             mirror_idx = 1
+             num_results = 1
+ 
++        # optional internal states collection (prelogits/encoder feats) synchronized with mirroring logic
++        collect_features = bool(getattr(self, '_collect_features', False))
++        want_enc_feats = bool(getattr(self, '_want_encoder_features', False))
++        current_prelogits = {'feat': None}  # last-stage logits (back-compat)
++        current_enc = {}  # encoder features per stage
++        current_dec = {}  # decoder pre_final_conv per level
++        current_logits_levels = {}  # logits per level (pre-softmax)
++        enc_hooks = []
++        dec_hooks = []
++        seg_head_hooks = []
++        seg_head_hook = None  # last-stage only (back-compat)
++        acc_pre = None  # last-stage logits accumulator
++        acc_enc = {}
++        acc_dec = {}
++        acc_logits_levels = {}
++        if collect_features and hasattr(self, 'seg_outputs'):
++            # hook all segmentation heads -> logits per level
++            num_dec_levels = len(self.seg_outputs)
++            for u in range(num_dec_levels):
++                def _make_seg_hook(level_idx):
++                    def _seg_hook_level(module, inp, out):
++                        current_logits_levels[level_idx] = out.detach()
++                    return _seg_hook_level
++                h = self.seg_outputs[u].register_forward_hook(_make_seg_hook(u))
++                seg_head_hooks.append(h)
++            # keep last-stage logits for back-compat '_collected_prelogits'
++            def _seg_hook_last(module, inp, out):
++                current_prelogits['feat'] = out.detach()
++            seg_head_hook = self.seg_outputs[-1].register_forward_hook(_seg_hook_last)
++            # hook decoder pre_final_conv outputs per level
++            if hasattr(self, 'conv_blocks_localization'):
++                num_dec_blocks = len(self.conv_blocks_localization)
++                # 只注册最后一个 decoder stage (dec_stage5)，避免计算所有 decoder stages 以提升速度
++                if num_dec_blocks > 0:
++                    # 注册最后一个 decoder block (索引 num_dec_blocks - 1，对应 dec_stage5)
++                    last_dec_idx = num_dec_blocks - 1
++                    def _make_dec_hook(level_idx):
++                        def _dec_hook(module, inp, out):
++                            current_dec[level_idx] = out.detach()
++                        return _dec_hook
++                    h = self.conv_blocks_localization[last_dec_idx].register_forward_hook(_make_dec_hook(last_dec_idx))
++                    dec_hooks.append(h)
++            if want_enc_feats and hasattr(self, 'conv_blocks_context'):
++                # 只注册 enc_stage0 的 hook，避免计算所有 encoder stages 以提升速度
++                num_encoder_stages = len(self.conv_blocks_context) - 1
++                if num_encoder_stages > 0:
++                    # 只注册 stage 0
++                    key = "enc_stage0"
++                    current_enc[key] = None
++                    def _make_enc_hook(k):
++                        def _enc_hook(module, inp, out):
++                            current_enc[k] = out.detach()
++                        return _enc_hook
++                    h = self.conv_blocks_context[0].register_forward_hook(_make_enc_hook(key))
++                    enc_hooks.append(h)
++
+         for m in range(mirror_idx):
+             if m == 0:
+                 pred = self.inference_apply_nonlin(self(x))
+                 result_torch += 1 / num_results * pred
++                # accumulate features for m=0
++                if collect_features:
++                    # last-stage logits (back-compat)
++                    pre = current_prelogits['feat']
++                    if pre is not None:
++                        if acc_pre is None:
++                            acc_pre = torch.zeros_like(pre)
++                        acc_pre += (1.0 / num_results) * pre
++                    # logits per level
++                    for l_idx, feat in current_logits_levels.items():
++                        if feat is None:
++                            continue
++                        if l_idx not in acc_logits_levels:
++                            acc_logits_levels[l_idx] = torch.zeros_like(feat)
++                        acc_logits_levels[l_idx] += (1.0 / num_results) * feat
++                    # decoder pre_final_conv per level
++                    for l_idx, feat in current_dec.items():
++                        if feat is None:
++                            continue
++                        if l_idx not in acc_dec:
++                            acc_dec[l_idx] = torch.zeros_like(feat)
++                        acc_dec[l_idx] += (1.0 / num_results) * feat
++                    if want_enc_feats:
++                        for k, feat in current_enc.items():
++                            if feat is None:
++                                continue
++                            if k not in acc_enc:
++                                acc_enc[k] = torch.zeros_like(feat)
++                            acc_enc[k] += (1.0 / num_results) * feat
+ 
+             if m == 1 and (1 in mirror_axes):
+                 pred = self.inference_apply_nonlin(self(torch.flip(x, (3, ))))
+                 result_torch += 1 / num_results * torch.flip(pred, (3, ))
++                if collect_features:
++                    pre = current_prelogits['feat']
++                    if pre is not None:
++                        pre = torch.flip(pre, (3,))
++                        if acc_pre is None:
++                            acc_pre = torch.zeros_like(pre)
++                        acc_pre += (1.0 / num_results) * pre
++                    for l_idx, feat in current_logits_levels.items():
++                        if feat is None:
++                            continue
++                        feat = torch.flip(feat, (3,))
++                        if l_idx not in acc_logits_levels:
++                            acc_logits_levels[l_idx] = torch.zeros_like(feat)
++                        acc_logits_levels[l_idx] += (1.0 / num_results) * feat
++                    for l_idx, feat in current_dec.items():
++                        if feat is None:
++                            continue
++                        feat = torch.flip(feat, (3,))
++                        if l_idx not in acc_dec:
++                            acc_dec[l_idx] = torch.zeros_like(feat)
++                        acc_dec[l_idx] += (1.0 / num_results) * feat
++                    if want_enc_feats:
++                        for k, feat in current_enc.items():
++                            if feat is None:
++                                continue
++                            feat = torch.flip(feat, (3,))
++                            if k not in acc_enc:
++                                acc_enc[k] = torch.zeros_like(feat)
++                            acc_enc[k] += (1.0 / num_results) * feat
+ 
+             if m == 2 and (0 in mirror_axes):
+                 pred = self.inference_apply_nonlin(self(torch.flip(x, (2, ))))
+                 result_torch += 1 / num_results * torch.flip(pred, (2, ))
++                if collect_features:
++                    pre = current_prelogits['feat']
++                    if pre is not None:
++                        pre = torch.flip(pre, (2,))
++                        if acc_pre is None:
++                            acc_pre = torch.zeros_like(pre)
++                        acc_pre += (1.0 / num_results) * pre
++                    for l_idx, feat in current_logits_levels.items():
++                        if feat is None:
++                            continue
++                        feat = torch.flip(feat, (2,))
++                        if l_idx not in acc_logits_levels:
++                            acc_logits_levels[l_idx] = torch.zeros_like(feat)
++                        acc_logits_levels[l_idx] += (1.0 / num_results) * feat
++                    for l_idx, feat in current_dec.items():
++                        if feat is None:
++                            continue
++                        feat = torch.flip(feat, (2,))
++                        if l_idx not in acc_dec:
++                            acc_dec[l_idx] = torch.zeros_like(feat)
++                        acc_dec[l_idx] += (1.0 / num_results) * feat
++                    if want_enc_feats:
++                        for k, feat in current_enc.items():
++                            if feat is None:
++                                continue
++                            feat = torch.flip(feat, (2,))
++                            if k not in acc_enc:
++                                acc_enc[k] = torch.zeros_like(feat)
++                            acc_enc[k] += (1.0 / num_results) * feat
+ 
+             if m == 3 and (0 in mirror_axes) and (1 in mirror_axes):
+                 pred = self.inference_apply_nonlin(self(torch.flip(x, (3, 2))))
+                 result_torch += 1 / num_results * torch.flip(pred, (3, 2))
++                if collect_features:
++                    pre = current_prelogits['feat']
++                    if pre is not None:
++                        pre = torch.flip(pre, (3, 2))
++                        if acc_pre is None:
++                            acc_pre = torch.zeros_like(pre)
++                        acc_pre += (1.0 / num_results) * pre
++                    for l_idx, feat in current_logits_levels.items():
++                        if feat is None:
++                            continue
++                        feat = torch.flip(feat, (3, 2))
++                        if l_idx not in acc_logits_levels:
++                            acc_logits_levels[l_idx] = torch.zeros_like(feat)
++                        acc_logits_levels[l_idx] += (1.0 / num_results) * feat
++                    for l_idx, feat in current_dec.items():
++                        if feat is None:
++                            continue
++                        feat = torch.flip(feat, (3, 2))
++                        if l_idx not in acc_dec:
++                            acc_dec[l_idx] = torch.zeros_like(feat)
++                        acc_dec[l_idx] += (1.0 / num_results) * feat
++                    if want_enc_feats:
++                        for k, feat in current_enc.items():
++                            if feat is None:
++                                continue
++                            feat = torch.flip(feat, (3, 2))
++                            if k not in acc_enc:
++                                acc_enc[k] = torch.zeros_like(feat)
++                            acc_enc[k] += (1.0 / num_results) * feat
+ 
+         if mult is not None:
+             result_torch[:, :] *= mult
++            if collect_features:
++                # broadcast spatial weighting across channels
++                if isinstance(mult, torch.Tensor):
++                    w = mult
++                else:
++                    w = maybe_to_torch(mult)
++                if acc_pre is not None:
++                    acc_pre *= w[None, None, ...]
++                # do not weight encoder features here because their spatial size is downsampled;
++                # encoder features will be upsampled to patch size and weighted in the tiled aggregator
++
++        if seg_head_hook is not None:
++            seg_head_hook.remove()
++        for h in seg_head_hooks:
++            h.remove()
++        for h in dec_hooks:
++            h.remove()
++        for h in enc_hooks:
++            h.remove()
++        if collect_features:
++            # save to object for outer aggregator to read
++            self._collected_prelogits = acc_pre
++            # add per-level collections for outer aggregator
++            self._collected_logits_per_level = acc_logits_levels
++            self._collected_dec_feats_per_level = acc_dec
++            if want_enc_feats:
++                self._collected_enc_feats = acc_enc
++            else:
++                self._collected_enc_feats = {}
+ 
+         return result_torch
+ 
+     def _internal_predict_2D_2Dconv_tiled(self, x: np.ndarray, step_size: float, do_mirroring: bool, mirror_axes: tuple,
+                                           patch_size: tuple, regions_class_order: tuple, use_gaussian: bool,
+                                           pad_border_mode: str, pad_kwargs: dict, all_in_gpu: bool,
+-                                          verbose: bool) -> Tuple[np.ndarray, np.ndarray]:
++                                          verbose: bool, return_prelogits: bool = False,
++                                          return_encoder_features: bool = False,
++                                          reduce_feature_maps: bool = False,
++                                          feature_reduce_mode: str = 'l2') -> Tuple[np.ndarray, np.ndarray]:
+         # better safe than sorry
+         assert len(x.shape) == 3, "x must be (c, x, y)"
+ 
+@@ -698,6 +903,32 @@ class SegmentationNetwork(NeuralNetwork):
+             aggregated_results = np.zeros([self.num_classes] + list(data.shape[1:]), dtype=np.float32)
+             aggregated_nb_of_predictions = np.zeros([self.num_classes] + list(data.shape[1:]), dtype=np.float32)
+ 
++        # optional: collect and aggregate prelogits with same weighting (now synced with TTA inside maybe_mirror)
++        aggregated_prelogits = None
++        # GPU aggregation for prelogits to avoid per-tile CPU transfers
++        use_gpu_feat_agg = torch.cuda.is_available()
++        feat_device = self.get_device() if use_gpu_feat_agg else None
++        aggregated_prelogits_t = None
++
++        # optional: encoder features from context path (skips)
++        aggregated_enc_feats = {}
++        # optional: decoder pre_final_conv per level (patch resolution)
++        aggregated_dec_feats = {}
++        # optional: logits per level (pre-softmax, patch resolution)
++        aggregated_logits_levels = {}
++
++        # counts for features (prelogits/encoder)
++        aggregated_feat_counts = None
++        aggregated_feat_counts_t = None
++        if return_prelogits or return_encoder_features:
++            if use_gpu_feat_agg:
++                aggregated_feat_counts_t = torch.zeros(list(data.shape[1:]), dtype=torch.float32,
++                                                       device=feat_device)
++                # also keep a CPU counts map for numpy-based per-level aggregators used below
++                aggregated_feat_counts = np.zeros(list(data.shape[1:]), dtype=np.float32)
++            else:
++                aggregated_feat_counts = np.zeros(list(data.shape[1:]), dtype=np.float32)
++
+         for x in steps[0]:
+             lb_x = x
+             ub_x = x + patch_size[0]
+@@ -705,27 +936,253 @@ class SegmentationNetwork(NeuralNetwork):
+                 lb_y = y
+                 ub_y = y + patch_size[1]
+ 
++                # set up synchronized collection within TTA path
++                self._collect_features = bool(return_prelogits or return_encoder_features)
++                self._want_encoder_features = bool(return_encoder_features)
++                self._collected_prelogits = None
++                self._collected_enc_feats = {}
+                 predicted_patch = self._internal_maybe_mirror_and_pred_2D(
+                     data[None, :, lb_x:ub_x, lb_y:ub_y], mirror_axes, do_mirroring,
+                     gaussian_importance_map)[0]
++                # unset flags
++                self._collect_features = False
++                self._want_encoder_features = False
+ 
+                 if all_in_gpu:
+                     predicted_patch = predicted_patch.half()
+                 else:
+-                    predicted_patch = predicted_patch.cpu().numpy()
++                    predicted_patch = predicted_patch.detach().cpu().numpy()
+ 
+                 aggregated_results[:, lb_x:ub_x, lb_y:ub_y] += predicted_patch
+                 aggregated_nb_of_predictions[:, lb_x:ub_x, lb_y:ub_y] += add_for_nb_of_preds
+ 
++                if return_prelogits and (aggregated_feat_counts is not None or aggregated_feat_counts_t is not None):
++                    pre = getattr(self, '_collected_prelogits', None)
++                    if pre is not None:
++                        if use_gpu_feat_agg:
++                            pre_t = pre.detach()
++                            if pre_t.device.type != 'cuda':
++                                pre_t = pre_t.cuda(feat_device, non_blocking=True)
++                            # remove batch dim if present
++                            if pre_t.dim() == 4:
++                                pre_t = pre_t[0]
++                            # ensure patch resolution
++                            if tuple(pre_t.shape[-2:]) != tuple(patch_size):
++                                pre_t = F.interpolate(pre_t.unsqueeze(0), size=(patch_size[0], patch_size[1]),
++                                                      mode='bilinear', align_corners=False)[0]
++                            if aggregated_prelogits_t is None:
++                                aggregated_prelogits_t = torch.zeros([pre_t.shape[0]] + list(data.shape[1:]),
++                                                                      dtype=pre_t.dtype, device=feat_device)
++                            # counts use Gaussian; prelogits already weighted inside maybe_mirror (acc_pre *= mult)
++                            if gaussian_importance_map is not None:
++                                weight_t = gaussian_importance_map
++                                if weight_t.device.type != 'cuda':
++                                    weight_t = weight_t.cuda(feat_device, non_blocking=True)
++                            else:
++                                weight_t = torch.ones((patch_size[0], patch_size[1]), dtype=pre_t.dtype,
++                                                      device=feat_device)
++                            # accumulate numerator WITHOUT extra weighting to avoid double-weighting
++                            aggregated_prelogits_t[:, lb_x:ub_x, lb_y:ub_y] += pre_t
++                            aggregated_feat_counts_t[lb_x:ub_x, lb_y:ub_y] += weight_t
++                        else:
++                            pre = pre.detach()
++                            pre_np = pre.cpu().numpy()[0]  # (C_feat, ph, pw)
++                            if aggregated_prelogits is None:
++                                aggregated_prelogits = np.zeros([pre_np.shape[0]] + list(data.shape[1:]),
++                                                                dtype=np.float32)
++                            aggregated_prelogits[:, lb_x:ub_x, lb_y:ub_y] += pre_np
++                            aggregated_feat_counts[lb_x:ub_x, lb_y:ub_y] += add_for_nb_of_preds
++
++                if return_encoder_features:
++                    enc_feats = getattr(self, '_collected_enc_feats', {})
++                    for key, feat in enc_feats.items():
++                        if feat is None:
++                            continue
++                        feat_t = feat
++                        if torch.cuda.is_available():
++                            feat_t = feat_t.cpu()
++                        # features are already in patch resolution (encoder outputs) -> upsample to patch size
++                        # but since we collected raw encoder feats (downsampled), we need to upsample here
++                        up_feat = F.interpolate(feat_t.detach(), size=(patch_size[0], patch_size[1]),
++                                                mode='bilinear', align_corners=False)
++                        up_np = up_feat.detach().cpu().numpy()[0]  # (C, ph, pw)
++                        if key not in aggregated_enc_feats or aggregated_enc_feats[key] is None:
++                            aggregated_enc_feats[key] = np.zeros([up_np.shape[0]] + list(data.shape[1:]),
++                                                                 dtype=np.float32)
++                        # weight numerator with gaussian (same as logits aggregation) after upsampling
++                        aggregated_enc_feats[key][:, lb_x:ub_x, lb_y:ub_y] += up_np * add_for_nb_of_preds[None]
++                        aggregated_feat_counts[lb_x:ub_x, lb_y:ub_y] += add_for_nb_of_preds
++                    # decoder pre_final_conv per level (already at patch resolution)
++                    dec_per = getattr(self, '_collected_dec_feats_per_level', {})
++                    for l_idx, feat in dec_per.items():
++                        if feat is None:
++                            continue
++                        feat_t = feat
++                        if torch.cuda.is_available():
++                            feat_t = feat_t.cpu()
++                        # upsample decoder features to patch size before weighting
++                        up_feat = F.interpolate(feat_t.detach(), size=(patch_size[0], patch_size[1]),
++                                                mode='bilinear', align_corners=False)
++                        up_np = up_feat.detach().cpu().numpy()[0]  # (C, ph, pw)
++                        key = f"dec_stage{l_idx}"
++                        if key not in aggregated_dec_feats or aggregated_dec_feats[key] is None:
++                            aggregated_dec_feats[key] = np.zeros([up_np.shape[0]] + list(data.shape[1:]),
++                                                                 dtype=np.float32)
++                        aggregated_dec_feats[key][:, lb_x:ub_x, lb_y:ub_y] += up_np * add_for_nb_of_preds[None]
++                        aggregated_feat_counts[lb_x:ub_x, lb_y:ub_y] += add_for_nb_of_preds
++                    # logits per level (pre-softmax), already at patch resolution
++                    logits_per = getattr(self, '_collected_logits_per_level', {})
++                    for l_idx, feat in logits_per.items():
++                        if feat is None:
++                            continue
++                        feat_t = feat
++                        if torch.cuda.is_available():
++                            feat_t = feat_t.cpu()
++                        # upsample logits to patch size before weighting
++                        up_feat = F.interpolate(feat_t.detach(), size=(patch_size[0], patch_size[1]),
++                                                mode='bilinear', align_corners=False)
++                        up_np = up_feat.detach().cpu().numpy()[0]  # (C, ph, pw)
++                        key = f"logits_stage{l_idx}"
++                        if key not in aggregated_logits_levels or aggregated_logits_levels[key] is None:
++                            aggregated_logits_levels[key] = np.zeros([up_np.shape[0]] + list(data.shape[1:]),
++                                                                     dtype=np.float32)
++                        aggregated_logits_levels[key][:, lb_x:ub_x, lb_y:ub_y] += up_np * add_for_nb_of_preds[None]
++                        aggregated_feat_counts[lb_x:ub_x, lb_y:ub_y] += add_for_nb_of_preds
++
+         # we reverse the padding here (remeber that we padded the input to be at least as large as the patch size
+         slicer = tuple(
+             [slice(0, aggregated_results.shape[i]) for i in
+              range(len(aggregated_results.shape) - (len(slicer) - 1))] + slicer[1:])
+         aggregated_results = aggregated_results[slicer]
+         aggregated_nb_of_predictions = aggregated_nb_of_predictions[slicer]
++        if return_prelogits:
++            if aggregated_prelogits is not None:
++                sl_pre = tuple([slice(0, aggregated_prelogits.shape[i]) for i in
++                                range(len(aggregated_prelogits.shape) - (len(slicer) - 1))] + list(slicer[1:]))
++                aggregated_prelogits = aggregated_prelogits[sl_pre]
++            if aggregated_prelogits_t is not None:
++                sl_pre_t = tuple([slice(0, aggregated_prelogits_t.shape[i]) for i in
++                                  range(len(aggregated_prelogits_t.shape) - (len(slicer) - 1))] + list(slicer[1:]))
++                aggregated_prelogits_t = aggregated_prelogits_t[sl_pre_t]
++        if return_encoder_features and len(aggregated_enc_feats) > 0:
++            for key, arr in aggregated_enc_feats.items():
++                if arr is None:
++                    continue
++                sl_enc = tuple([slice(0, arr.shape[i]) for i in
++                                range(len(arr.shape) - (len(slicer) - 1))] + list(slicer[1:]))
++                aggregated_enc_feats[key] = arr[sl_enc]
++        if aggregated_feat_counts is not None:
++            aggregated_feat_counts = aggregated_feat_counts[slicer[1:]]
++        if aggregated_feat_counts_t is not None:
++            aggregated_feat_counts_t = aggregated_feat_counts_t[slicer[1:]]
+ 
+         # computing the class_probabilities by dividing the aggregated result with result_numsamples
+         class_probabilities = aggregated_results / aggregated_nb_of_predictions
++        if return_prelogits and (aggregated_prelogits is not None or aggregated_prelogits_t is not None):
++            if aggregated_prelogits_t is not None:
++                counts_safe_t = aggregated_feat_counts_t.clone()
++                counts_safe_t[counts_safe_t == 0] = 1.0
++                pre_full_t = aggregated_prelogits_t / counts_safe_t[None]
++                prelogits_full = pre_full_t.detach().cpu().numpy()
++            else:
++                aggregated_feat_counts[aggregated_feat_counts == 0] = 1.0
++                prelogits_full = aggregated_prelogits / aggregated_feat_counts[None]
++            if reduce_feature_maps:
++                # reduce channel dimension -> (H, W)
++                if feature_reduce_mode == 'l2':
++                    prelogits_full = np.sqrt(np.sum(prelogits_full ** 2, axis=0))
++                elif feature_reduce_mode == 'mean':
++                    prelogits_full = np.mean(prelogits_full, axis=0)
++                elif feature_reduce_mode == 'max':
++                    prelogits_full = np.max(prelogits_full, axis=0)
++                elif feature_reduce_mode == 'absmean':
++                    prelogits_full = np.mean(np.abs(prelogits_full), axis=0)
++                elif feature_reduce_mode == 'absmax':
++                    prelogits_full = np.max(np.abs(prelogits_full), axis=0)
++                else:
++                    # default to save all 4 channels
++                    prelogits_full = prelogits_full
++        if return_encoder_features and len(aggregated_enc_feats) > 0:
++            enc_feats_full = {}
++            counts_safe = aggregated_feat_counts.copy()
++            counts_safe[counts_safe == 0] = 1.0
++            for key, arr in aggregated_enc_feats.items():
++                if arr is None:
++                    continue
++                # align spatial dims if needed
++                if tuple(arr.shape[-2:]) != tuple(counts_safe.shape):
++                    h = min(arr.shape[-2], counts_safe.shape[0])
++                    w = min(arr.shape[-1], counts_safe.shape[1])
++                    arr = arr[:, :h, :w]
++                    cs = counts_safe[:h, :w]
++                else:
++                    cs = counts_safe
++                feat_full = arr / cs[None]
++                if reduce_feature_maps:
++                    if feature_reduce_mode == 'l2':
++                        feat_full = np.sqrt(np.sum(feat_full ** 2, axis=0))
++                    elif feature_reduce_mode == 'mean':
++                        feat_full = np.mean(feat_full, axis=0)
++                    elif feature_reduce_mode == 'max':
++                        feat_full = np.max(feat_full, axis=0)
++                    elif feature_reduce_mode == 'absmean':
++                        feat_full = np.mean(np.abs(feat_full), axis=0)
++                    elif feature_reduce_mode == 'absmax':
++                        feat_full = np.max(np.abs(feat_full), axis=0)
++                    else:
++                        feat_full = np.sqrt(np.sum(feat_full ** 2, axis=0))
++                enc_feats_full[key] = feat_full
++            # also finalize decoder and logits per level with same counts
++            for key, arr in aggregated_dec_feats.items():
++                if arr is None:
++                    continue
++                if tuple(arr.shape[-2:]) != tuple(counts_safe.shape):
++                    h = min(arr.shape[-2], counts_safe.shape[0])
++                    w = min(arr.shape[-1], counts_safe.shape[1])
++                    arr = arr[:, :h, :w]
++                    cs = counts_safe[:h, :w]
++                else:
++                    cs = counts_safe
++                feat_full = arr / cs[None]
++                if reduce_feature_maps:
++                    if feature_reduce_mode == 'l2':
++                        feat_full = np.sqrt(np.sum(feat_full ** 2, axis=0))
++                    elif feature_reduce_mode == 'mean':
++                        feat_full = np.mean(feat_full, axis=0)
++                    elif feature_reduce_mode == 'max':
++                        feat_full = np.max(feat_full, axis=0)
++                    elif feature_reduce_mode == 'absmean':
++                        feat_full = np.mean(np.abs(feat_full), axis=0)
++                    elif feature_reduce_mode == 'absmax':
++                        feat_full = np.max(np.abs(feat_full), axis=0)
++                    else:
++                        feat_full = np.sqrt(np.sum(feat_full ** 2, axis=0))
++                enc_feats_full[key] = feat_full
++            for key, arr in aggregated_logits_levels.items():
++                if arr is None:
++                    continue
++                if tuple(arr.shape[-2:]) != tuple(counts_safe.shape):
++                    h = min(arr.shape[-2], counts_safe.shape[0])
++                    w = min(arr.shape[-1], counts_safe.shape[1])
++                    arr = arr[:, :h, :w]
++                    cs = counts_safe[:h, :w]
++                else:
++                    cs = counts_safe
++                feat_full = arr / cs[None]
++                if reduce_feature_maps:
++                    if feature_reduce_mode == 'l2':
++                        feat_full = np.sqrt(np.sum(feat_full ** 2, axis=0))
++                    elif feature_reduce_mode == 'mean':
++                        feat_full = np.mean(feat_full, axis=0)
++                    elif feature_reduce_mode == 'max':
++                        feat_full = np.max(feat_full, axis=0)
++                    elif feature_reduce_mode == 'absmean':
++                        feat_full = np.mean(np.abs(feat_full), axis=0)
++                    elif feature_reduce_mode == 'absmax':
++                        feat_full = np.max(np.abs(feat_full), axis=0)
++                    else:
++                        feat_full = np.sqrt(np.sum(feat_full ** 2, axis=0))
++                enc_feats_full[key] = feat_full
+ 
+         if regions_class_order is None:
+             predicted_segmentation = class_probabilities.argmax(0)
+@@ -745,8 +1202,16 @@ class SegmentationNetwork(NeuralNetwork):
+                 predicted_segmentation = predicted_segmentation.detach().cpu().numpy()
+ 
+             class_probabilities = class_probabilities.detach().cpu().numpy()
++            if return_prelogits and aggregated_prelogits is not None:
++                prelogits_full = prelogits_full  # already numpy
+ 
+         if verbose: print("prediction done")
++        if return_prelogits and (aggregated_prelogits is not None or aggregated_prelogits_t is not None) and return_encoder_features and len(aggregated_enc_feats) > 0:
++            return predicted_segmentation, class_probabilities, prelogits_full, enc_feats_full
++        if return_prelogits and (aggregated_prelogits is not None or aggregated_prelogits_t is not None):
++            return predicted_segmentation, class_probabilities, prelogits_full
++        if return_encoder_features and len(aggregated_enc_feats) > 0:
++            return predicted_segmentation, class_probabilities, enc_feats_full
+         return predicted_segmentation, class_probabilities
+ 
+     def _internal_predict_3D_2Dconv(self, x: np.ndarray, min_size: Tuple[int, int], do_mirroring: bool,
+@@ -804,7 +1269,10 @@ class SegmentationNetwork(NeuralNetwork):
+                                           regions_class_order: tuple = None, use_gaussian: bool = False,
+                                           pad_border_mode: str = "edge", pad_kwargs: dict =None,
+                                           all_in_gpu: bool = False,
+-                                          verbose: bool = True) -> Tuple[np.ndarray, np.ndarray]:
++                                          verbose: bool = True, return_prelogits: bool = False,
++                                          return_encoder_features: bool = False,
++                                          reduce_feature_maps: bool = False,
++                                          feature_reduce_mode: str = 'l2') -> Tuple[np.ndarray, np.ndarray]:
+         if all_in_gpu:
+             raise NotImplementedError
+ 
+@@ -812,11 +1280,30 @@ class SegmentationNetwork(NeuralNetwork):
+ 
+         predicted_segmentation = []
+         softmax_pred = []
++        prelogits_list = []
++        enc_features_list = []
+ 
+         for s in range(x.shape[1]):
+-            pred_seg, softmax_pres = self._internal_predict_2D_2Dconv_tiled(
+-                x[:, s], step_size, do_mirroring, mirror_axes, patch_size, regions_class_order, use_gaussian,
+-                pad_border_mode, pad_kwargs, all_in_gpu, verbose)
++            if return_prelogits or return_encoder_features:
++                ret = self._internal_predict_2D_2Dconv_tiled(
++                    x[:, s], step_size, do_mirroring, mirror_axes, patch_size, regions_class_order, use_gaussian,
++                    pad_border_mode, pad_kwargs, all_in_gpu, verbose,
++                    return_prelogits=return_prelogits, return_encoder_features=return_encoder_features,
++                    reduce_feature_maps=reduce_feature_maps, feature_reduce_mode=feature_reduce_mode)
++                if return_prelogits and return_encoder_features:
++                    pred_seg, softmax_pres, pre_feats, enc_feats = ret
++                    prelogits_list.append(pre_feats[None])
++                    enc_features_list.append(enc_feats)
++                elif return_prelogits:
++                    pred_seg, softmax_pres, pre_feats = ret
++                    prelogits_list.append(pre_feats[None])
++                else:
++                    pred_seg, softmax_pres, enc_feats = ret
++                    enc_features_list.append(enc_feats)
++            else:
++                pred_seg, softmax_pres = self._internal_predict_2D_2Dconv_tiled(
++                    x[:, s], step_size, do_mirroring, mirror_axes, patch_size, regions_class_order, use_gaussian,
++                    pad_border_mode, pad_kwargs, all_in_gpu, verbose, return_prelogits=False)
+ 
+             predicted_segmentation.append(pred_seg[None])
+             softmax_pred.append(softmax_pres[None])
+@@ -824,6 +1311,42 @@ class SegmentationNetwork(NeuralNetwork):
+         predicted_segmentation = np.vstack(predicted_segmentation)
+         softmax_pred = np.vstack(softmax_pred).transpose((1, 0, 2, 3))
+ 
++        if return_prelogits or return_encoder_features:
++            prelogits_vol = None
++            enc_vols = None
++            if return_prelogits:
++                # if reduced -> elements are (H, W) -> stack -> (Z, H, W); else (C, H, W) -> (Z, C, H, W) then transpose
++                if reduce_feature_maps:
++                    prelogits_vol = np.vstack(prelogits_list)  # (Z, H, W)
++                    prelogits_vol = prelogits_vol.transpose((1, 0, 2))  # (H, Z, W) keep consistency with (Z,H,W) below
++                    prelogits_vol = prelogits_vol.transpose((1, 0, 2))  # (Z, H, W)
++                else:
++                    prelogits_vol = np.vstack(prelogits_list).transpose((1, 0, 2, 3))
++            if return_encoder_features and len(enc_features_list) > 0:
++                enc_vols = {}
++                # collect keys
++                first_non_empty = None
++                for d in enc_features_list:
++                    if isinstance(d, dict) and len(d) > 0:
++                        first_non_empty = d
++                        break
++                if first_non_empty is not None:
++                    for key in sorted(first_non_empty.keys()):
++                        stage_slices = []
++                        for d in enc_features_list:
++                            stage_slices.append(d[key][None])
++                        if reduce_feature_maps:
++                            # d[key] is (H, W) -> stack -> (Z, H, W)
++                            enc_vols[key] = np.vstack(stage_slices)  # (Z, H, W)
++                            enc_vols[key] = enc_vols[key].transpose((1, 0, 2))  # (H, Z, W)
++                            enc_vols[key] = enc_vols[key].transpose((1, 0, 2))  # (Z, H, W)
++                        else:
++                            enc_vols[key] = np.vstack(stage_slices).transpose((1, 0, 2, 3))
++            if return_prelogits and return_encoder_features:
++                return predicted_segmentation, softmax_pred, prelogits_vol, enc_vols
++            if return_prelogits:
++                return predicted_segmentation, softmax_pred, prelogits_vol
++            return predicted_segmentation, softmax_pred, enc_vols
+         return predicted_segmentation, softmax_pred
+ 
+ 
+diff --git a/nnunet/training/network_training/nnUNetTrainer.py b/nnunet/training/network_training/nnUNetTrainer.py
+index 393eaa3..a160368 100644
+--- a/nnunet/training/network_training/nnUNetTrainer.py
++++ b/nnunet/training/network_training/nnUNetTrainer.py
+@@ -35,6 +35,7 @@ from nnunet.network_architecture.generic_UNet import Generic_UNet
+ from nnunet.network_architecture.initialization import InitWeights_He
+ from nnunet.network_architecture.neural_network import SegmentationNetwork
+ from nnunet.postprocessing.connected_components import determine_postprocessing
++from nnunet.preprocessing.preprocessing import get_lowres_axis, get_do_separate_z, resample_data_or_seg
+ from nnunet.training.data_augmentation.default_data_augmentation import default_3D_augmentation_params, \
+     default_2D_augmentation_params, get_default_augmentation, get_patch_size
+ from nnunet.training.dataloading.dataset_loading import load_dataset, DataLoader3D, DataLoader2D, unpack_dataset
+@@ -524,6 +525,204 @@ class nnUNetTrainer(NetworkTrainer):
+         self.network.train(current_mode)
+         return ret
+ 
++    def extract_and_save_features(self, data: np.ndarray, out_npz: str,
++                                  use_sliding_window: bool = True, step_size: float = 0.5,
++                                  save_dtype=np.float16, compress: bool = True, verbose: bool = False,
++                                  return_encoder_features: bool = True,
++                                  reduce_feature_maps: bool = False, feature_reduce_mode: str = 'l2',
++                                  properties: dict = None) -> None:
++        """
++        Runs inference to extract intermediate features (prelogits and optionally encoder features) and saves them.
++        Supports 2D networks and pseudo-3D inference for 2D convs. 3D conv networks are not supported here.
++        :param data: preprocessed network input (shape (C, H, W) for 2D or (C, X, Y, Z) for 3D volumes)
++        :param out_npz: output .npz path
++        """
++        assert isinstance(self.network, (SegmentationNetwork, nn.DataParallel))
++
++        # choose mirroring consistent with training
++        do_mirroring = bool(self.data_aug_params.get("do_mirror", True))
++        if do_mirroring:
++            mirror_axes = tuple(self.data_aug_params.get("mirror_axes", (0, 1)))
++        else:
++            mirror_axes = ()
++
++        # enforce eval mode (and disable deep supervision for inference if present)
++        current_mode = self.network.training
++        ds_attr_present = hasattr(self.network, "do_ds")
++        ds_prev = None
++        if ds_attr_present:
++            ds_prev = self.network.do_ds
++            self.network.do_ds = False
++        self.network.eval()
++
++        try:
++            # only 2D conv path is supported for feature extraction (hooks implemented there)
++            is_2d_conv = (self.network.conv_op == nn.Conv2d) or isinstance(self.network.conv_op, type) and (self.network.conv_op is nn.Conv2d)
++            if not is_2d_conv:
++                print("WARNING: extract_and_save_features currently supports only Conv2d-based networks. Skipping.")
++                return
++
++            # decide which tiled function to call based on input dimensionality
++            use_gaussian = True
++            pad_border_mode = self.inference_pad_border_mode
++            pad_kwargs = self.inference_pad_kwargs
++            all_in_gpu = False
++
++            ret = None
++            if use_sliding_window:
++                if data.ndim == 3:
++                    # (C, H, W)
++                    ret = self.network._internal_predict_2D_2Dconv_tiled(
++                        data, step_size, do_mirroring, mirror_axes, self.patch_size, self.regions_class_order,
++                        use_gaussian, pad_border_mode, pad_kwargs, all_in_gpu, verbose,
++                        return_prelogits=True, return_encoder_features=return_encoder_features,
++                        reduce_feature_maps=reduce_feature_maps, feature_reduce_mode=feature_reduce_mode
++                    )
++                elif data.ndim == 4:
++                    # (C, X, Y, Z) -> pseudo-3D with 2D convs
++                    ret = self.network._internal_predict_3D_2Dconv_tiled(
++                        data, self.patch_size, do_mirroring, mirror_axes, step_size, self.regions_class_order,
++                        use_gaussian, pad_border_mode, pad_kwargs, all_in_gpu, verbose,
++                        return_prelogits=True, return_encoder_features=return_encoder_features,
++                        reduce_feature_maps=reduce_feature_maps, feature_reduce_mode=feature_reduce_mode
++                    )
++                else:
++                    raise RuntimeError("Unexpected data ndim. Expected 3 (C,H,W) or 4 (C,X,Y,Z).")
++            else:
++                # non-sliding not supported for features, keep behavior explicit
++                raise NotImplementedError("extract_and_save_features requires use_sliding_window=True")
++
++            # parse returns (vary depending on flags and availability)
++            prelogits = None
++            enc_feats = None
++            if isinstance(ret, tuple):
++                if len(ret) == 4:
++                    _, _, prelogits, enc_feats = ret
++                elif len(ret) == 3:
++                    # could be (seg, softmax, prelogits) or (seg, softmax, enc_feats)
++                    third = ret[2]
++                    if isinstance(third, dict):
++                        enc_feats = third
++                    else:
++                        prelogits = third
++                # else ignore (segmentation/softmax only)
++
++            # build npz payload
++            to_save = {}
++            def _to_numpy(x, target_dtype=None):
++                if isinstance(x, np.ndarray):
++                    if target_dtype is not None and x.dtype != target_dtype:
++                        return x.astype(target_dtype, copy=False)
++                    return x
++                if torch.is_tensor(x):
++                    t = x.detach()
++                    if target_dtype is not None:
++                        # convert on GPU/CPU once, then transfer
++                        try:
++                            # if tensor on CUDA, convert dtype there to reduce CPU work
++                            t = t.to(dtype=getattr(torch, str(np.dtype(target_dtype))), copy=False)
++                        except Exception:
++                            pass
++                    arr = t.cpu().numpy()
++                    if target_dtype is not None and arr.dtype != target_dtype:
++                        arr = arr.astype(target_dtype, copy=False)
++                    return arr
++                arr = np.asarray(x)
++                if target_dtype is not None and arr.dtype != target_dtype:
++                    arr = arr.astype(target_dtype, copy=False)
++                return arr
++            def _resample_and_uncrop(arr_c_first: np.ndarray, props: dict) -> np.ndarray:
++                """
++                arr_c_first: (C, H, W) or (C, Z, H, W); resample to size_after_cropping then uncrop to original_size_of_raw_data
++                """
++                if props is None:
++                    return arr_c_first
++                target_after_crop = props.get('size_after_cropping')
++                orig_size = props.get('original_size_of_raw_data')
++                crop_bbox = props.get('crop_bbox')
++                if target_after_crop is None or orig_size is None:
++                    return arr_c_first
++                shp = arr_c_first.shape[1:]
++                # decide separate z
++                if len(shp) == 2:
++                    do_separate_z = False
++                    lowres_axis = None
++                else:
++                    if get_do_separate_z(props.get('original_spacing')):
++                        do_separate_z = True
++                        lowres_axis = get_lowres_axis(props.get('original_spacing'))
++                    elif get_do_separate_z(props.get('spacing_after_resampling')):
++                        do_separate_z = True
++                        lowres_axis = get_lowres_axis(props.get('spacing_after_resampling'))
++                    else:
++                        do_separate_z = False
++                        lowres_axis = None
++                # resample if needed
++                if tuple(shp) != tuple(target_after_crop):
++                    res = resample_data_or_seg(arr_c_first, target_after_crop, is_seg=False,
++                                               axis=lowres_axis, order=1, do_separate_z=do_separate_z,
++                                               order_z=0)
++                else:
++                    res = arr_c_first
++                # uncrop back to original raw size
++                if crop_bbox is not None:
++                    if len(res.shape) == 3:
++                        c, h, w = res.shape
++                        out = np.zeros((c, *orig_size), dtype=res.dtype)
++                        # adjust bbox upper bounds to fit res
++                        bb = [list(b) for b in crop_bbox]
++                        bb[0][1] = min(bb[0][0] + h, orig_size[0])
++                        bb[1][1] = min(bb[1][0] + w, orig_size[1])
++                        out[:, bb[0][0]:bb[0][1], bb[1][0]:bb[1][1]] = res[:, :bb[0][1]-bb[0][0], :bb[1][1]-bb[1][0]]
++                        return out
++                    elif len(res.shape) == 4:
++                        c, z, h, w = res.shape
++                        out = np.zeros((c, *orig_size), dtype=res.dtype)
++                        bb = [list(b) for b in crop_bbox]
++                        bb[0][1] = min(bb[0][0] + z, orig_size[0])
++                        bb[1][1] = min(bb[1][0] + h, orig_size[1])
++                        bb[2][1] = min(bb[2][0] + w, orig_size[2])
++                        out[:, bb[0][0]:bb[0][1], bb[1][0]:bb[1][1], bb[2][0]:bb[2][1]] = \
++                            res[:, :bb[0][1]-bb[0][0], :bb[1][1]-bb[1][0], :bb[2][1]-bb[2][0]]
++                        return out
++                    else:
++                        return res
++                return res
++            if prelogits is not None:
++                prelogits_np = _to_numpy(prelogits, target_dtype=save_dtype)
++                prelogits_np = _resample_and_uncrop(prelogits_np, properties)
++                # store last-stage pre-softmax logits
++                to_save["logits_final"] = prelogits_np
++            if isinstance(enc_feats, dict) and len(enc_feats) > 0:
++                # 只保存 enc_stage0 和 dec_stage5，忽略其他 encoder/decoder 特征
++                if "enc_stage0" in enc_feats:
++                    v = enc_feats["enc_stage0"]
++                    v_np = _to_numpy(v, target_dtype=save_dtype)
++                    v_np = _resample_and_uncrop(v_np, properties)
++                    to_save["enc_stage0"] = v_np
++                # 保存 dec_stage5（最后一个 decoder stage）
++                if "dec_stage5" in enc_feats:
++                    v = enc_feats["dec_stage5"]
++                    v_np = _to_numpy(v, target_dtype=save_dtype)
++                    v_np = _resample_and_uncrop(v_np, properties)
++                    to_save["dec_stage5"] = v_np
++
++            # persist
++            if len(to_save) == 0:
++                print("WARNING: No features collected (prelogits/encoder). Nothing saved for", out_npz)
++                return
++            if compress:
++                np.savez_compressed(out_npz, **to_save)
++            else:
++                np.savez(out_npz, **to_save)
++            if verbose:
++                print(f"saved features to {out_npz} with keys: {list(to_save.keys())}")
++        finally:
++            # restore mode flags
++            if ds_attr_present and ds_prev is not None:
++                self.network.do_ds = ds_prev
++            self.network.train(current_mode)
++
+     def validate(self, do_mirroring: bool = True, use_sliding_window: bool = True, step_size: float = 0.5,
+                  save_softmax: bool = True, use_gaussian: bool = True, overwrite: bool = True,
+                  validation_folder_name: str = 'validation_raw', debug: bool = False, all_in_gpu: bool = False,
